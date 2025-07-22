@@ -11,14 +11,20 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 #pragma comment(lib, "d3d9.lib") 
 
 typedef HRESULT(__stdcall* tEndScene)(IDirect3DDevice9* pDevice);
+typedef HRESULT(__stdcall* tReset)(IDirect3DDevice9* pDevice, D3DPRESENT_PARAMETERS *pPresentationParameters);
 typedef void(__cdecl* FuncVoid)();
+typedef void (__cdecl* tCreateCar)(int modelId);
+typedef char(__cdecl* tShowMsg)(char*, int, int, int);
 
 HWND hWnd = NULL; 
 
 tEndScene pOriginalEndScene = nullptr; 
+tReset pOriginalReset = nullptr; 
 LONG originalWndProc;
 
 tEndScene pEndScene = nullptr;         
+tReset pReset = nullptr;         
+
 bool drawCursor = false;
 
 FuncVoid ClearMouseHistory = (FuncVoid)0x541BD0;
@@ -27,6 +33,13 @@ FuncVoid UpdatePads = (FuncVoid)0x541DD0;
 ImGuiContext* ctx = ImGui::CreateContext();
 ImGuiIO& io = ImGui::GetIO();
 
+uintptr_t CPed;
+float* pCPedHealth;
+float* pCPedMaxHealth;
+char modelId[16] = "400";
+tCreateCar CreateCar;
+tShowMsg showMsg;
+
 bool WriteMemory(void* destination, const void* data, size_t size) {
     DWORD oldProtect;
     
@@ -34,12 +47,9 @@ bool WriteMemory(void* destination, const void* data, size_t size) {
         std::cerr << "VirtualProtect failed: " << GetLastError() << std::endl;
         return false;
     }
-
     memcpy(destination, data, size);
-
     DWORD temp;
     VirtualProtect(destination, size, oldProtect, &temp);
-
     return true;
 }
 
@@ -58,6 +68,13 @@ LRESULT CALLBACK MyWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 HRESULT __stdcall MyEndScene(IDirect3DDevice9* pDevice) {
     static bool initialized = false;
     if (!initialized) {
+
+        CPed = *(uintptr_t*)0xB6F5F0;
+        pCPedHealth = (float*)(CPed + 0x540);
+        pCPedMaxHealth = (float*)(CPed + 0x544);
+        CreateCar = (tCreateCar)0x00407851;
+        showMsg = (tShowMsg)0x588BE0;
+
         std::cout << "!!!!!!!!!!!!Hooked EndScene!" << std::endl;
 
         std::cout << "[*] Initializing ImGui..." << std::endl;
@@ -105,12 +122,36 @@ HRESULT __stdcall MyEndScene(IDirect3DDevice9* pDevice) {
 
     ImGui::Begin("cheeto"); 
     ImGui::Text("Hello, world!"); 
+    ImGui::Text("Health address: 0x%p", pCPedHealth);
+    ImGui::Text("MaxHealth address: 0x%p", pCPedMaxHealth);
+    ImGui::SliderFloat("Health", pCPedHealth, 1.0f, (float)*pCPedMaxHealth);
+    ImGui::InputText("Model id", modelId, sizeof(modelId), ImGuiInputTextFlags_CharsDecimal);
+
+    if(ImGui::Button("Spawn vehicle")) {
+        if (atoi(modelId) >= 400 && atoi(modelId) <= 611) {
+            CreateCar(atoi(modelId));
+            const char* message = "Vehicle spawned";
+            showMsg((char*)message, 0, 0, 0);
+        }
+    }
+
     ImGui::End();
 
     ImGui::Render();
     ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
 
     return pOriginalEndScene(pDevice);
+}
+
+HRESULT __stdcall MyReset(IDirect3DDevice9* pDevice, D3DPRESENT_PARAMETERS *pPresentationParameters) {
+    ImGui_ImplDX9_InvalidateDeviceObjects();
+
+    HRESULT hr = pOriginalReset(pDevice, pPresentationParameters);
+
+    if (SUCCEEDED(hr))
+        ImGui_ImplDX9_CreateDeviceObjects(); 
+
+    return hr;
 }
 
 void InitializeMinHook() {
@@ -160,11 +201,38 @@ void HookEndScene() {
     std::cout << "[+] Successfully hooked EndScene using game's D3D device." << std::endl;
 }
 
+void HookReset() {
+
+    IDirect3DDevice9** ppDevice = (IDirect3DDevice9**)0xC97C28;
+    IDirect3DDevice9* pDevice = *ppDevice;
+
+    void** vtable = *reinterpret_cast<void***>(pDevice);
+    pReset = (tReset)vtable[16]; // 16 -> the Reset's index in the VMT (Virtual Method Table)
+    std::cout << "[*] Hooking Reset..." << std::endl;
+
+    MH_STATUS status = MH_CreateHook((LPVOID)pReset, (LPVOID)&MyReset, reinterpret_cast<LPVOID*>(&pOriginalReset));
+    if (status != MH_OK) {
+        std::cout << "[-] Failed to CREATE hook (Reset). Code: " << status << std::endl;
+        return;
+    }
+
+    std::cout << "[*] Created hook for Reset..." << std::endl;
+
+    status = MH_EnableHook((LPVOID)pReset);
+    if (status != MH_OK) {
+        std::cout << "[-] Failed to ENABLE hook (Reset). Code: " << status << std::endl;
+        return;
+    }
+
+    std::cout << "[+] Successfully hooked Reset!" << std::endl;
+}
+
 
 void Hook() {
     InitializeMinHook();
     HookWndProc();
     HookEndScene();
+    HookReset();
 }
 
 DWORD WINAPI MainThread(HMODULE hModule) {
